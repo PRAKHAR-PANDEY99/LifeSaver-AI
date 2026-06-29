@@ -14,6 +14,7 @@ import TasksTab from './components/TasksTab';
 import ScheduleTab from './components/ScheduleTab';
 import HabitsTab from './components/HabitsTab';
 import ReviewsTab from './components/ReviewsTab';
+import ProfileTab from './components/ProfileTab';
 
 // Icons
 import { 
@@ -29,16 +30,18 @@ import {
   Bell,
   Cpu,
   HelpCircle,
-  Database
+  Database,
+  User as UserIcon
 } from 'lucide-react';
 
 export default function App() {
   // Navigation & Auth State
   const [activeTab, setActiveTab] = useState('dashboard');
   const [user, setUser] = useState<User | null>(null);
-  const [authMode, setAuthMode] = useState<'authenticated' | 'login' | 'register'>('authenticated');
+  const [authMode, setAuthMode] = useState<'authenticated' | 'login' | 'register'>('login');
   const [authEmail, setAuthEmail] = useState('');
   const [authName, setAuthName] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
   const [authError, setAuthError] = useState<string | null>(null);
 
   // Business Data States
@@ -52,27 +55,47 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(true);
   const [notification, setNotification] = useState<string | null>(null);
 
+  // Helper to generate auth headers for API calls
+  const getAuthHeaders = () => {
+    const token = localStorage.getItem('lifesaver_auth_token');
+    return {
+      'Content-Type': 'application/json',
+      ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+    };
+  };
+
   // 1. Load User & Workspace Session on Mount
   useEffect(() => {
     async function loadWorkspace() {
       setIsLoading(true);
       try {
-        // Fetch User profile (default demo profile or logged-in)
-        const userEmail = localStorage.getItem('lifesaver_auth_email') || 'demo@lifesaver.ai';
-        const userRes = await fetch(`/api/auth/me?email=${encodeURIComponent(userEmail)}`);
+        const token = localStorage.getItem('lifesaver_auth_token');
+        if (!token) {
+          setAuthMode('login');
+          setIsLoading(false);
+          return;
+        }
+
+        const userRes = await fetch('/api/auth/me', {
+          headers: {
+            'Authorization': `Bearer ${token}`
+          }
+        });
         
         if (userRes.ok) {
           const { user: userData } = await userRes.json();
           setUser(userData);
+          setAuthMode('authenticated');
           
           // Load User Workspace assets
-          await fetchWorkspaceData(userData.id);
+          await fetchWorkspaceData();
         } else {
-          // Force login view
+          localStorage.removeItem('lifesaver_auth_token');
           setAuthMode('login');
         }
       } catch (err) {
         console.error('Failed to boot LifeSaver AI session', err);
+        setAuthMode('login');
       } finally {
         setIsLoading(false);
       }
@@ -80,17 +103,19 @@ export default function App() {
     loadWorkspace();
   }, []);
 
-  const fetchWorkspaceData = async (userId: string) => {
+  const fetchWorkspaceData = async () => {
     try {
+      const headers = getAuthHeaders();
+      
       // 1. Tasks
-      const tasksRes = await fetch(`/api/tasks?userId=${userId}`);
+      const tasksRes = await fetch('/api/tasks', { headers });
       if (tasksRes.ok) {
         const { tasks: tasksData } = await tasksRes.json();
         setTasks(tasksData);
       }
 
       // 2. Habits
-      const habitsRes = await fetch(`/api/habits?userId=${userId}`);
+      const habitsRes = await fetch('/api/habits', { headers });
       if (habitsRes.ok) {
         const { habits: habitsData } = await habitsRes.json();
         setHabits(habitsData);
@@ -98,21 +123,21 @@ export default function App() {
 
       // 3. Today's Schedule
       const todayStr = new Date().toISOString().split('T')[0];
-      const schedRes = await fetch(`/api/schedule?userId=${userId}&date=${todayStr}`);
+      const schedRes = await fetch(`/api/schedule?date=${todayStr}`, { headers });
       if (schedRes.ok) {
         const { schedule: schedData } = await schedRes.json();
         setSchedule(schedData);
       }
 
       // 4. Weekly Reviews
-      const reviewsRes = await fetch(`/api/weekly-reviews?userId=${userId}`);
+      const reviewsRes = await fetch('/api/weekly-reviews', { headers });
       if (reviewsRes.ok) {
         const { reviews: reviewsData } = await reviewsRes.json();
         setWeeklyReviews(reviewsData);
       }
 
       // 5. Productivity History Logs
-      const historyRes = await fetch(`/api/productivity-history?userId=${userId}`);
+      const historyRes = await fetch('/api/productivity-history', { headers });
       if (historyRes.ok) {
         const { logs } = await historyRes.json();
         setHistoryLogs(logs);
@@ -132,14 +157,17 @@ export default function App() {
   // 2. Auth Actions
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!authEmail) return;
+    if (!authEmail || !authName || !authPassword) {
+      setAuthError('Name, email, and password are all required.');
+      return;
+    }
     setAuthError(null);
 
     try {
       const res = await fetch('/api/auth/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: authEmail, name: authName })
+        body: JSON.stringify({ email: authEmail, name: authName, password: authPassword })
       });
 
       if (!res.ok) {
@@ -147,11 +175,11 @@ export default function App() {
         throw new Error(errData.error || 'Failed registration.');
       }
 
-      const { user: newUser } = await res.json();
-      localStorage.setItem('lifesaver_auth_email', newUser.email);
+      const { user: newUser, token } = await res.json();
+      localStorage.setItem('lifesaver_auth_token', token);
       setUser(newUser);
       setAuthMode('authenticated');
-      await fetchWorkspaceData(newUser.id);
+      await fetchWorkspaceData();
       triggerNotification('Welcome to LifeSaver AI! Onboarding profile activated.');
     } catch (err: any) {
       setAuthError(err.message);
@@ -160,38 +188,42 @@ export default function App() {
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!authEmail) return;
+    if (!authEmail || !authPassword) {
+      setAuthError('Email and password are required.');
+      return;
+    }
     setAuthError(null);
 
     try {
       const res = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: authEmail })
+        body: JSON.stringify({ email: authEmail, password: authPassword })
       });
 
       if (!res.ok) {
         const errData = await res.json();
-        throw new Error(errData.error || 'No profile matched.');
+        throw new Error(errData.error || 'No profile matched or incorrect credentials.');
       }
 
-      const { user: matchedUser } = await res.json();
-      localStorage.setItem('lifesaver_auth_email', matchedUser.email);
+      const { user: matchedUser, token } = await res.json();
+      localStorage.setItem('lifesaver_auth_token', token);
       setUser(matchedUser);
       setAuthMode('authenticated');
-      await fetchWorkspaceData(matchedUser.id);
-      triggerNotification(`Welcome back, ${matchedUser.name || matchedUser.email}!`);
+      await fetchWorkspaceData();
+      triggerNotification(`Welcome back, ${matchedUser.name}!`);
     } catch (err: any) {
       setAuthError(err.message);
     }
   };
 
   const handleSignOut = () => {
-    localStorage.removeItem('lifesaver_auth_email');
+    localStorage.removeItem('lifesaver_auth_token');
     setUser(null);
     setAuthMode('login');
     setAuthEmail('');
     setAuthName('');
+    setAuthPassword('');
     setTasks([]);
     setHabits([]);
     setSchedule(null);
@@ -203,8 +235,8 @@ export default function App() {
     try {
       const res = await fetch('/api/tasks', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...taskData, userId: user?.id })
+        headers: getAuthHeaders(),
+        body: JSON.stringify(taskData)
       });
 
       if (res.ok) {
@@ -221,7 +253,7 @@ export default function App() {
     try {
       const res = await fetch(`/api/tasks/${id}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify(updates)
       });
 
@@ -231,7 +263,7 @@ export default function App() {
         
         // Re-fetch today's schedule and metrics if status changed to completed
         if (updates.status && user) {
-          await fetchWorkspaceData(user.id);
+          await fetchWorkspaceData();
         }
       }
     } catch (e) {
@@ -241,7 +273,10 @@ export default function App() {
 
   const handleDeleteTask = async (id: string) => {
     try {
-      const res = await fetch(`/api/tasks/${id}`, { method: 'DELETE' });
+      const res = await fetch(`/api/tasks/${id}`, { 
+        method: 'DELETE',
+        headers: getAuthHeaders()
+      });
       if (res.ok) {
         setTasks(prev => prev.filter(t => t.id !== id));
         triggerNotification('Commitment removed from dossier.');
@@ -253,7 +288,10 @@ export default function App() {
 
   const handleTriggerBreakdown = async (id: string) => {
     try {
-      const res = await fetch(`/api/tasks/${id}/breakdown`, { method: 'POST' });
+      const res = await fetch(`/api/tasks/${id}/breakdown`, { 
+        method: 'POST',
+        headers: getAuthHeaders()
+      });
       if (res.ok) {
         const { task } = await res.json();
         setTasks(prev => prev.map(t => t.id === id ? task : t));
@@ -266,7 +304,10 @@ export default function App() {
 
   const handleTriggerRiskCheck = async (id: string) => {
     try {
-      const res = await fetch(`/api/tasks/${id}/risk`, { method: 'POST' });
+      const res = await fetch(`/api/tasks/${id}/risk`, { 
+        method: 'POST',
+        headers: getAuthHeaders()
+      });
       if (res.ok) {
         const { task } = await res.json();
         setTasks(prev => prev.map(t => t.id === id ? task : t));
@@ -282,9 +323,8 @@ export default function App() {
     try {
       const res = await fetch('/api/schedule/generate', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify({
-          userId: user?.id,
           date: new Date().toISOString().split('T')[0],
           energyLevel
         })
@@ -304,9 +344,8 @@ export default function App() {
     try {
       const res = await fetch('/api/schedule/replan', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify({
-          userId: user?.id,
           date: new Date().toISOString().split('T')[0]
         })
       });
@@ -316,7 +355,7 @@ export default function App() {
         setSchedule(updatedSched);
         
         // Sync tasks too since statuses might have updated
-        if (user) await fetchWorkspaceData(user.id);
+        if (user) await fetchWorkspaceData();
         
         triggerNotification('AI Auto-Replanning completed! Timeline adapted to save slipped tasks.');
       }
@@ -329,9 +368,8 @@ export default function App() {
     try {
       const res = await fetch('/api/schedule/emergency', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify({
-          userId: user?.id,
           date: new Date().toISOString().split('T')[0],
           query
         })
@@ -352,8 +390,8 @@ export default function App() {
     try {
       const res = await fetch('/api/habits', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...habitData, userId: user?.id })
+        headers: getAuthHeaders(),
+        body: JSON.stringify(habitData)
       });
 
       if (res.ok) {
@@ -371,7 +409,7 @@ export default function App() {
       const todayStr = new Date().toISOString().split('T')[0];
       const res = await fetch(`/api/habits/${id}/toggle`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify({ date: todayStr })
       });
 
@@ -380,7 +418,7 @@ export default function App() {
         setHabits(prev => prev.map(h => h.id === id ? habit : h));
         
         // Sync history score too
-        if (user) await fetchWorkspaceData(user.id);
+        if (user) await fetchWorkspaceData();
       }
     } catch (e) {
       console.error(e);
@@ -389,7 +427,10 @@ export default function App() {
 
   const handleDeleteHabit = async (id: string) => {
     try {
-      const res = await fetch(`/api/habits/${id}`, { method: 'DELETE' });
+      const res = await fetch(`/api/habits/${id}`, { 
+        method: 'DELETE',
+        headers: getAuthHeaders()
+      });
       if (res.ok) {
         setHabits(prev => prev.filter(h => h.id !== id));
         triggerNotification('Habit routine removed.');
@@ -404,9 +445,8 @@ export default function App() {
     try {
       const res = await fetch('/api/weekly-reviews/generate', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify({
-          userId: user?.id,
           weekStartDate: new Date(Date.now() - 1000 * 60 * 60 * 168).toISOString().split('T')[0]
         })
       });
@@ -456,7 +496,7 @@ export default function App() {
               <Zap className="w-6 h-6 fill-current animate-pulse" />
             </div>
             <h2 className="text-xl font-extrabold tracking-tight text-zinc-900 dark:text-zinc-100">LifeSaver AI Companion</h2>
-            <p className="text-xs text-zinc-500 dark:text-zinc-400">Secure registration and passwordless demo sign-in</p>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">Secure JWT authentication & isolated data environment</p>
           </div>
 
           <form onSubmit={authMode === 'login' ? handleLogin : handleRegister} className="space-y-4 text-xs">
@@ -469,7 +509,7 @@ export default function App() {
                   value={authName}
                   onChange={(e) => setAuthName(e.target.value)}
                   placeholder="Alex Mercer"
-                  className="w-full px-3.5 py-2.5 border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900 rounded-xl outline-none text-zinc-800 dark:text-zinc-200"
+                  className="w-full px-3.5 py-2.5 border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900 rounded-xl outline-none text-zinc-800 dark:text-zinc-200 focus:border-indigo-500 dark:focus:border-indigo-400"
                 />
               </div>
             )}
@@ -481,8 +521,20 @@ export default function App() {
                 required
                 value={authEmail}
                 onChange={(e) => setAuthEmail(e.target.value)}
-                placeholder="demo@lifesaver.ai"
-                className="w-full px-3.5 py-2.5 border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900 rounded-xl outline-none text-zinc-800 dark:text-zinc-200"
+                placeholder="you@domain.com"
+                className="w-full px-3.5 py-2.5 border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900 rounded-xl outline-none text-zinc-800 dark:text-zinc-200 focus:border-indigo-500 dark:focus:border-indigo-400"
+              />
+            </div>
+
+            <div>
+              <label className="block text-zinc-500 dark:text-zinc-400 mb-1 font-medium">Password</label>
+              <input
+                type="password"
+                required
+                value={authPassword}
+                onChange={(e) => setAuthPassword(e.target.value)}
+                placeholder="••••••••"
+                className="w-full px-3.5 py-2.5 border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900 rounded-xl outline-none text-zinc-800 dark:text-zinc-200 focus:border-indigo-500 dark:focus:border-indigo-400"
               />
             </div>
 
@@ -496,11 +548,11 @@ export default function App() {
               type="submit"
               className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl transition-colors cursor-pointer"
             >
-              {authMode === 'login' ? 'Sign In / Sandbox Enter' : 'Register Profile'}
+              {authMode === 'login' ? 'Sign In / Enter Account' : 'Register Profile'}
             </button>
           </form>
 
-          <div className="flex items-center justify-between text-xs pt-2">
+          <div className="flex items-center justify-center text-xs pt-2">
             <button
               onClick={() => {
                 setAuthMode(authMode === 'login' ? 'register' : 'login');
@@ -513,20 +565,6 @@ export default function App() {
               ) : (
                 <><LogIn className="w-4 h-4" /> Go back to sign-in</>
               )}
-            </button>
-            <button
-              onClick={() => {
-                setAuthEmail('demo@lifesaver.ai');
-                setAuthMode('login');
-                // Trigger quick enter
-                setTimeout(() => {
-                  const fakeEvent = { preventDefault: () => {} };
-                  handleLogin(fakeEvent as any);
-                }, 100);
-              }}
-              className="text-zinc-500 hover:underline cursor-pointer font-medium"
-            >
-              Quick Guest Demo
             </button>
           </div>
         </div>
@@ -565,15 +603,21 @@ export default function App() {
 
             {/* Profile Sign-out dropdown */}
             <div className="flex items-center gap-3">
-              <div className="hidden sm:flex flex-col text-right">
-                <span className="text-xs font-bold text-zinc-800 dark:text-zinc-200 leading-tight">{user.name}</span>
-                <span className="text-[10px] text-zinc-400 font-medium">{user.email}</span>
-              </div>
-              <img 
-                src={user.avatarUrl || `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(user.email)}`} 
-                alt="Avatar" 
-                className="w-8 h-8 rounded-full border border-zinc-200 dark:border-zinc-800 bg-zinc-50"
-              />
+              <button
+                onClick={() => setActiveTab('profile')}
+                className="flex items-center gap-2.5 text-left hover:opacity-85 transition-opacity cursor-pointer focus:outline-none"
+                title="View Profile"
+              >
+                <div className="hidden sm:flex flex-col text-right">
+                  <span className="text-xs font-bold text-zinc-800 dark:text-zinc-200 leading-tight">{user.name}</span>
+                  <span className="text-[10px] text-zinc-400 font-medium">{user.email}</span>
+                </div>
+                <img 
+                  src={user.avatarUrl || `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(user.email)}`} 
+                  alt="Avatar" 
+                  className="w-8 h-8 rounded-full border border-zinc-200 dark:border-zinc-800 bg-zinc-50"
+                />
+              </button>
               <button
                 onClick={handleSignOut}
                 className="p-1.5 rounded-lg text-zinc-400 hover:text-rose-500 hover:bg-zinc-50 dark:hover:bg-zinc-900 transition-colors cursor-pointer"
@@ -596,6 +640,7 @@ export default function App() {
             { id: 'schedule', label: 'Daily Schedule', icon: Clock },
             { id: 'habits', label: 'Habit Tracker', icon: Flame },
             { id: 'reviews', label: 'Weekly Review', icon: Award },
+            { id: 'profile', label: 'Profile', icon: UserIcon },
           ].map(tab => {
             const Icon = tab.icon;
             const isSelected = activeTab === tab.id;
@@ -693,6 +738,16 @@ export default function App() {
             reviews={weeklyReviews}
             historyLogs={historyLogs}
             onTriggerReview={handleTriggerReview}
+          />
+        )}
+
+        {activeTab === 'profile' && (
+          <ProfileTab 
+            user={user}
+            onLogout={handleSignOut}
+            historyLogs={historyLogs}
+            tasksCount={tasks.length}
+            habitsCount={habits.length}
           />
         )}
 

@@ -11,6 +11,7 @@ const UserMongoSchema = new mongoose.Schema({
   _id: { type: String, required: true },
   email: { type: String, unique: true, required: true },
   name: String,
+  password: { type: String, required: true },
   avatarUrl: String,
   joinedAt: String,
   preferences: {
@@ -88,6 +89,7 @@ const WeeklyReviewMongoSchema = new mongoose.Schema({
 
 const HistoryLogMongoSchema = new mongoose.Schema({
   _id: { type: String, required: true },
+  userId: { type: String, required: true },
   date: String,
   score: Number,
   tasksCompleted: Number,
@@ -200,8 +202,7 @@ export async function connectDatabase() {
     isConnected = true;
     console.log('✅ Successfully connected to MongoDB Atlas!');
     
-    // Seed initial database demo data if the DB is completely empty
-    await seedDatabase();
+    // Default seeding disabled to keep databases clean and isolated
     
     return true;
   } catch (err) {
@@ -213,6 +214,7 @@ export async function connectDatabase() {
 
 // Automatic database seeder for a populated onboarding experience
 async function seedDatabase() {
+  return; // Disabled to ensure zero demo user pollution
   try {
     const userCount = await UserModel.countDocuments();
     if (userCount === 0) {
@@ -394,8 +396,13 @@ export const db = {
     return u ? mapUser(u) : null;
   },
 
-  async saveUser(user: Partial<User> & { email: string }): Promise<User> {
-    const id = user.id || 'default_user';
+  async getUserByEmailWithPassword(email: string): Promise<any | null> {
+    const u = await UserModel.findOne({ email });
+    return u || null;
+  },
+
+  async saveUser(user: Partial<User> & { email: string; password?: string }): Promise<User> {
+    const id = user.id || new mongoose.Types.ObjectId().toString();
     
     // Find by ID first, then by email
     let u = await UserModel.findOne({ $or: [{ _id: id }, { email: user.email }] });
@@ -403,12 +410,14 @@ export const db = {
       if (user.name) u.name = user.name;
       if (user.avatarUrl) u.avatarUrl = user.avatarUrl;
       if (user.preferences) u.preferences = user.preferences;
+      if (user.password) u.password = user.password;
       await u.save();
     } else {
       u = new UserModel({
         _id: id,
         email: user.email,
         name: user.name || user.email.split('@')[0],
+        password: user.password || '',
         avatarUrl: user.avatarUrl || `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(user.email)}`,
         joinedAt: user.joinedAt || new Date().toISOString(),
         preferences: user.preferences || { dailyGoalCount: 4, peakEnergyTime: 'morning' }
@@ -511,8 +520,9 @@ export const db = {
 
   // HISTORY LOGS
   async getHistoryLogs(userId: string): Promise<ProductivityHistoryLog[]> {
-    const logs = await HistoryLogModel.find({}).sort({ date: 1 });
+    const logs = await HistoryLogModel.find({ userId }).sort({ date: 1 });
     return logs.map((l: any) => ({
+      userId: l.userId,
       date: l.date,
       score: l.score,
       tasksCompleted: l.tasksCompleted,
@@ -521,14 +531,15 @@ export const db = {
     }));
   },
 
-  async saveHistoryLog(log: ProductivityHistoryLog): Promise<ProductivityHistoryLog> {
-    const dateId = `log_${log.date}`;
+  async saveHistoryLog(log: ProductivityHistoryLog & { userId: string }): Promise<ProductivityHistoryLog> {
+    const dateId = `log_${log.userId}_${log.date}`;
     const saved = await HistoryLogModel.findOneAndUpdate(
-      { date: log.date },
+      { userId: log.userId, date: log.date },
       { ...log, _id: dateId },
       { new: true, upsert: true }
     ) as any;
     return {
+      userId: saved.userId,
       date: saved.date,
       score: saved.score,
       tasksCompleted: saved.tasksCompleted,

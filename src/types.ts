@@ -94,6 +94,7 @@ export interface DailySchedule {
 }
 
 export interface ProductivityHistoryLog {
+  userId?: string;
   date: string; // YYYY-MM-DD
   score: number; // 0-100
   tasksCompleted: number;

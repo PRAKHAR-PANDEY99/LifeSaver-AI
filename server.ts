@@ -8,6 +8,7 @@ import path from 'path';
 import dotenv from 'dotenv';
 import { createServer as createViteServer } from 'vite';
 import { db, connectDatabase } from './src/lib/db';
+import { hashPassword, verifyPassword, generateToken, verifyToken } from './src/lib/auth-utils';
 import { 
   analyzeDeadlineRisk, 
   breakDownTask, 
@@ -38,6 +39,31 @@ async function startServer() {
 
   // ----------------- API ROUTES -----------------
 
+  // Authentication Middleware
+  const authenticateToken = (req: any, res: any, next: any) => {
+    try {
+      const authHeader = req.headers['authorization'];
+      const token = authHeader && authHeader.split(' ')[1];
+
+      if (!token) {
+        res.status(401).json({ error: 'Authentication token is required.' });
+        return;
+      }
+
+      const payload = verifyToken(token);
+      if (!payload) {
+        res.status(403).json({ error: 'Invalid or expired session token.' });
+        return;
+      }
+
+      req.userId = payload.userId;
+      req.userEmail = payload.email;
+      next();
+    } catch (err: any) {
+      res.status(500).json({ error: 'Authentication error' });
+    }
+  };
+
   // 0. DB Status Indicator
   app.get('/api/db-status', (req, res) => {
     res.json({
@@ -48,12 +74,11 @@ async function startServer() {
   });
 
   // 1. User Authentication Routes
-  // Simple Mock Secure User Auth (Storable in DB)
   app.post('/api/auth/register', async (req, res) => {
     try {
       const { email, name, password } = req.body;
-      if (!email) {
-        res.status(400).json({ error: 'Email is required.' });
+      if (!email || !name || !password) {
+        res.status(400).json({ error: 'Name, email, and password are all required.' });
         return;
       }
       const existing = await db.getUserByEmail(email);
@@ -62,11 +87,15 @@ async function startServer() {
         return;
       }
       
+      const hashedPassword = hashPassword(password);
       const user = await db.saveUser({
         email,
-        name: name || email.split('@')[0]
+        name,
+        password: hashedPassword
       });
-      res.status(201).json({ user });
+      
+      const token = generateToken({ userId: user.id, email: user.email });
+      res.status(201).json({ user, token });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -75,43 +104,55 @@ async function startServer() {
   app.post('/api/auth/login', async (req, res) => {
     try {
       const { email, password } = req.body;
-      if (!email) {
-        res.status(400).json({ error: 'Email is required.' });
+      if (!email || !password) {
+        res.status(400).json({ error: 'Email and password are required.' });
         return;
       }
-      const user = await db.getUserByEmail(email);
+      const uDoc = await db.getUserByEmailWithPassword(email);
+      if (!uDoc) {
+        res.status(401).json({ error: 'Invalid email or password.' });
+        return;
+      }
+      
+      const isMatch = verifyPassword(password, uDoc.password);
+      if (!isMatch) {
+        res.status(401).json({ error: 'Invalid email or password.' });
+        return;
+      }
+      
+      const user = {
+        id: uDoc._id,
+        email: uDoc.email,
+        name: uDoc.name,
+        avatarUrl: uDoc.avatarUrl,
+        joinedAt: uDoc.joinedAt,
+        preferences: uDoc.preferences
+      };
+      
+      const token = generateToken({ userId: user.id, email: user.email });
+      res.json({ user, token });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/api/auth/me', authenticateToken, async (req: any, res) => {
+    try {
+      const user = await db.getUserByEmail(req.userEmail);
       if (!user) {
-        res.status(404).json({ error: 'No user found with this email.' });
+        res.status(404).json({ error: 'User not found.' });
         return;
       }
-      // Since it is a developer prototype, we allow passwordless or any password
       res.json({ user });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  app.get('/api/auth/me', async (req, res) => {
+  app.put('/api/auth/preferences', authenticateToken, async (req: any, res) => {
     try {
-      // Return default demo profile if no email specified, or lookup
-      const email = (req.query.email as string) || 'demo@lifesaver.ai';
-      let user = await db.getUserByEmail(email);
-      if (!user && email === 'demo@lifesaver.ai') {
-        user = await db.saveUser({
-          email: 'demo@lifesaver.ai',
-          name: 'Alex Mercer'
-        });
-      }
-      res.json({ user });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  app.put('/api/auth/preferences', async (req, res) => {
-    try {
-      const { email, preferences } = req.body;
-      const user = await db.getUserByEmail(email || 'demo@lifesaver.ai');
+      const { preferences } = req.body;
+      const user = await db.getUserByEmail(req.userEmail);
       if (!user) {
         res.status(404).json({ error: 'User not found.' });
         return;
@@ -125,9 +166,9 @@ async function startServer() {
   });
 
   // 2. Task Management Routes
-  app.get('/api/tasks', async (req, res) => {
+  app.get('/api/tasks', authenticateToken, async (req: any, res) => {
     try {
-      const userId = (req.query.userId as string) || 'default_user';
+      const userId = req.userId;
       const tasks = await db.getTasks(userId);
       res.json({ tasks });
     } catch (err: any) {
@@ -135,9 +176,10 @@ async function startServer() {
     }
   });
 
-  app.post('/api/tasks', async (req, res) => {
+  app.post('/api/tasks', authenticateToken, async (req: any, res) => {
     try {
-      const { title, description, category, deadline, priority, energyRequired, durationMinutes, subtasks, userId } = req.body;
+      const { title, description, category, deadline, priority, energyRequired, durationMinutes, subtasks } = req.body;
+      const userId = req.userId;
       
       if (!title || !deadline) {
         res.status(400).json({ error: 'Title and deadline are required.' });
@@ -145,7 +187,7 @@ async function startServer() {
       }
 
       const newTask: Omit<any, 'id'> = {
-        userId: userId || 'default_user',
+        userId,
         title,
         description: description || '',
         category: category || 'Personal',
@@ -159,7 +201,7 @@ async function startServer() {
       };
 
       // Auto-trigger Gemini API breakdown and risk check on save if available
-      const siblingTasks = await db.getTasks(newTask.userId);
+      const siblingTasks = await db.getTasks(userId);
       
       // Attempt dynamic breakdown if subtasks are empty
       if (!newTask.subtasks || newTask.subtasks.length === 0) {
@@ -194,12 +236,16 @@ async function startServer() {
     }
   });
 
-  app.put('/api/tasks/:id', async (req, res) => {
+  app.put('/api/tasks/:id', authenticateToken, async (req: any, res) => {
     try {
       const { id } = req.params;
       const currentTask = await db.getTaskById(id);
       if (!currentTask) {
         res.status(404).json({ error: 'Task not found.' });
+        return;
+      }
+      if (currentTask.userId !== req.userId) {
+        res.status(403).json({ error: 'You do not have permission to modify this task.' });
         return;
       }
 
@@ -212,9 +258,10 @@ async function startServer() {
         
         // Log in productivity history
         const todayStr = new Date().toISOString().split('T')[0];
-        const allLogs = await db.getHistoryLogs(mergedTask.userId);
+        const allLogs = await db.getHistoryLogs(req.userId);
         const logMatch = allLogs.find(l => l.date === todayStr);
         const newLog = {
+          userId: req.userId,
           date: todayStr,
           score: logMatch ? Math.min(100, logMatch.score + 10) : 75,
           tasksCompleted: (logMatch?.tasksCompleted || 0) + 1,
@@ -231,9 +278,18 @@ async function startServer() {
     }
   });
 
-  app.delete('/api/tasks/:id', async (req, res) => {
+  app.delete('/api/tasks/:id', authenticateToken, async (req: any, res) => {
     try {
       const { id } = req.params;
+      const currentTask = await db.getTaskById(id);
+      if (!currentTask) {
+        res.status(404).json({ error: 'Task not found.' });
+        return;
+      }
+      if (currentTask.userId !== req.userId) {
+        res.status(403).json({ error: 'You do not have permission to delete this task.' });
+        return;
+      }
       const success = await db.deleteTask(id);
       res.json({ success });
     } catch (err: any) {
@@ -241,12 +297,16 @@ async function startServer() {
     }
   });
 
-  app.post('/api/tasks/:id/breakdown', async (req, res) => {
+  app.post('/api/tasks/:id/breakdown', authenticateToken, async (req: any, res) => {
     try {
       const { id } = req.params;
       const task = await db.getTaskById(id);
       if (!task) {
         res.status(404).json({ error: 'Task not found.' });
+        return;
+      }
+      if (task.userId !== req.userId) {
+        res.status(403).json({ error: 'You do not have permission to modify this task.' });
         return;
       }
 
@@ -265,7 +325,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/tasks/:id/risk', async (req, res) => {
+  app.post('/api/tasks/:id/risk', authenticateToken, async (req: any, res) => {
     try {
       const { id } = req.params;
       const task = await db.getTaskById(id);
@@ -273,8 +333,12 @@ async function startServer() {
         res.status(404).json({ error: 'Task not found.' });
         return;
       }
+      if (task.userId !== req.userId) {
+        res.status(403).json({ error: 'You do not have permission to modify this task.' });
+        return;
+      }
 
-      const siblingTasks = await db.getTasks(task.userId);
+      const siblingTasks = await db.getTasks(req.userId);
       const filteredSiblings = siblingTasks.filter(t => t.id !== id && t.status === 'Pending');
       const risk = await analyzeDeadlineRisk(task, filteredSiblings);
       
@@ -291,9 +355,9 @@ async function startServer() {
   });
 
   // 3. Goal and Habit Tracking Routes
-  app.get('/api/habits', async (req, res) => {
+  app.get('/api/habits', authenticateToken, async (req: any, res) => {
     try {
-      const userId = (req.query.userId as string) || 'default_user';
+      const userId = req.userId;
       const habits = await db.getHabits(userId);
       res.json({ habits });
     } catch (err: any) {
@@ -301,16 +365,17 @@ async function startServer() {
     }
   });
 
-  app.post('/api/habits', async (req, res) => {
+  app.post('/api/habits', authenticateToken, async (req: any, res) => {
     try {
-      const { title, description, frequency, userId } = req.body;
+      const { title, description, frequency } = req.body;
+      const userId = req.userId;
       if (!title) {
         res.status(400).json({ error: 'Habit title is required.' });
         return;
       }
 
       const newHabit: Omit<any, 'id'> = {
-        userId: userId || 'default_user',
+        userId,
         title,
         description: description || '',
         frequency: frequency || 'daily',
@@ -328,13 +393,13 @@ async function startServer() {
     }
   });
 
-  app.put('/api/habits/:id/toggle', async (req, res) => {
+  app.put('/api/habits/:id/toggle', authenticateToken, async (req: any, res) => {
     try {
       const { id } = req.params;
       const { date } = req.body; // YYYY-MM-DD
       const targetDate = date || new Date().toISOString().split('T')[0];
 
-      const habit = await db.getHabits('default_user'); // lookup
+      const habit = await db.getHabits(req.userId);
       const target = habit.find(h => h.id === id);
       if (!target) {
         res.status(404).json({ error: 'Habit not found.' });
@@ -389,9 +454,10 @@ async function startServer() {
         
         // Log in history logs
         const todayStr = new Date().toISOString().split('T')[0];
-        const allLogs = await db.getHistoryLogs(target.userId);
+        const allLogs = await db.getHistoryLogs(req.userId);
         const logMatch = allLogs.find(l => l.date === todayStr);
         const newLog = {
+          userId: req.userId,
           date: todayStr,
           score: logMatch ? Math.min(100, logMatch.score + 5) : 70,
           tasksCompleted: logMatch?.tasksCompleted || 0,
@@ -410,9 +476,15 @@ async function startServer() {
     }
   });
 
-  app.delete('/api/habits/:id', async (req, res) => {
+  app.delete('/api/habits/:id', authenticateToken, async (req: any, res) => {
     try {
       const { id } = req.params;
+      const habits = await db.getHabits(req.userId);
+      const target = habits.find(h => h.id === id);
+      if (!target) {
+        res.status(404).json({ error: 'Habit not found or access denied.' });
+        return;
+      }
       const success = await db.deleteHabit(id);
       res.json({ success });
     } catch (err: any) {
@@ -421,9 +493,9 @@ async function startServer() {
   });
 
   // 4. Energy-Based Scheduling & Replanning
-  app.get('/api/schedule', async (req, res) => {
+  app.get('/api/schedule', authenticateToken, async (req: any, res) => {
     try {
-      const userId = (req.query.userId as string) || 'default_user';
+      const userId = req.userId;
       const date = (req.query.date as string) || new Date().toISOString().split('T')[0];
       const schedule = await db.getScheduleForDate(userId, date);
       res.json({ schedule });
@@ -432,20 +504,20 @@ async function startServer() {
     }
   });
 
-  app.post('/api/schedule/generate', async (req, res) => {
+  app.post('/api/schedule/generate', authenticateToken, async (req: any, res) => {
     try {
-      const { userId, date, energyLevel } = req.body;
-      const uid = userId || 'default_user';
+      const { date, energyLevel } = req.body;
+      const userId = req.userId;
       const d = date || new Date().toISOString().split('T')[0];
       const energy = energyLevel || 'Medium';
 
-      const tasks = await db.getTasks(uid);
+      const tasks = await db.getTasks(userId);
       const pendingTasks = tasks.filter(t => t.status === 'Pending');
 
       const result = await generateDailySchedule(pendingTasks, energy, d);
       
       const newSchedule = {
-        userId: uid,
+        userId,
         date: d,
         energyLevel: energy,
         blocks: result.blocks.map((b, i) => ({ ...b, id: `block_${Date.now()}_${i}` })),
@@ -461,19 +533,19 @@ async function startServer() {
   });
 
   // AI Auto-Replanning API
-  app.post('/api/schedule/replan', async (req, res) => {
+  app.post('/api/schedule/replan', authenticateToken, async (req: any, res) => {
     try {
-      const { userId, date } = req.body;
-      const uid = userId || 'default_user';
+      const { date } = req.body;
+      const userId = req.userId;
       const d = date || new Date().toISOString().split('T')[0];
 
-      const currentSchedule = await db.getScheduleForDate(uid, d);
+      const currentSchedule = await db.getScheduleForDate(userId, d);
       if (!currentSchedule) {
         res.status(404).json({ error: 'No schedule found for today. Generate one first.' });
         return;
       }
 
-      const tasks = await db.getTasks(uid);
+      const tasks = await db.getTasks(userId);
       
       // Auto-detect missed tasks: Pending tasks whose deadlines have elapsed, or blocks scheduled before current time which are pending
       const now = new Date();
@@ -504,10 +576,10 @@ async function startServer() {
   });
 
   // Emergency Mode API
-  app.post('/api/schedule/emergency', async (req, res) => {
+  app.post('/api/schedule/emergency', authenticateToken, async (req: any, res) => {
     try {
-      const { userId, query, date } = req.body;
-      const uid = userId || 'default_user';
+      const { query, date } = req.body;
+      const userId = req.userId;
       const d = date || new Date().toISOString().split('T')[0];
 
       if (!query) {
@@ -515,13 +587,13 @@ async function startServer() {
         return;
       }
 
-      const tasks = await db.getTasks(uid);
+      const tasks = await db.getTasks(userId);
       const pendingTasks = tasks.filter(t => t.status === 'Pending');
 
       const result = await generateEmergencyPlan(query, pendingTasks);
 
       const emergencySchedule = {
-        userId: uid,
+        userId,
         date: d,
         energyLevel: 'High' as const, // Force High for emergency adrenaline
         blocks: result.blocks.map((b, i) => ({ ...b, id: `block_em_${Date.now()}_${i}` })),
@@ -537,9 +609,9 @@ async function startServer() {
   });
 
   // 5. Weekly Reviews & Analytics
-  app.get('/api/weekly-reviews', async (req, res) => {
+  app.get('/api/weekly-reviews', authenticateToken, async (req: any, res) => {
     try {
-      const userId = (req.query.userId as string) || 'default_user';
+      const userId = req.userId;
       const reviews = await db.getWeeklyReviews(userId);
       res.json({ reviews });
     } catch (err: any) {
@@ -547,19 +619,22 @@ async function startServer() {
     }
   });
 
-  app.post('/api/weekly-reviews/generate', async (req, res) => {
+  app.post('/api/weekly-reviews/generate', authenticateToken, async (req: any, res) => {
     try {
-      const { userId, weekStartDate } = req.body;
-      const uid = userId || 'default_user';
+      const { weekStartDate } = req.body;
+      const userId = req.userId;
       const d = weekStartDate || new Date(Date.now() - 1000 * 60 * 60 * 168).toISOString().split('T')[0]; // last week
 
-      const tasks = await db.getTasks(uid);
+      const tasks = await db.getTasks(userId);
       const completedTasks = tasks.filter(t => t.status === 'Completed');
       const missedTasks = tasks.filter(t => t.status === 'Missed');
-      const logs = await db.getHistoryLogs(uid);
+      const logs = await db.getHistoryLogs(userId);
 
       const reviewData = await generateWeeklyReview(completedTasks, missedTasks, logs, d);
-      const review = await db.saveWeeklyReview(reviewData as any);
+      const review = await db.saveWeeklyReview({
+        ...reviewData,
+        userId
+      } as any);
       res.status(201).json({ review });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -567,9 +642,9 @@ async function startServer() {
   });
 
   // Productivity history analytics
-  app.get('/api/productivity-history', async (req, res) => {
+  app.get('/api/productivity-history', authenticateToken, async (req: any, res) => {
     try {
-      const userId = (req.query.userId as string) || 'default_user';
+      const userId = req.userId;
       const logs = await db.getHistoryLogs(userId);
       res.json({ logs });
     } catch (err: any) {
@@ -578,9 +653,9 @@ async function startServer() {
   });
 
   // 6. Voice Assistant Route
-  app.post('/api/voice-command', async (req, res) => {
+  app.post('/api/voice-command', authenticateToken, async (req: any, res) => {
     try {
-      const { text, userId } = req.body;
+      const { text } = req.body;
       if (!text) {
         res.status(400).json({ error: 'Text command is required.' });
         return;

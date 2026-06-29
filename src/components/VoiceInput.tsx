@@ -91,10 +91,14 @@ export default function VoiceInput({ onParsedTask, userId }: VoiceInputProps) {
     setError(null);
 
     try {
+      const token = localStorage.getItem('lifesaver_auth_token');
       const res = await fetch('/api/voice-command', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: textToProcess, userId: userId || 'default_user' })
+        headers: { 
+          'Content-Type': 'application/json',
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify({ text: textToProcess })
       });
 
       if (!res.ok) throw new Error('Failed to parse command.');
