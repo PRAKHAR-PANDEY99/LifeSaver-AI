@@ -1,0 +1,6 @@
+{
+  "name": "LifeSaver AI",
+  "description": "An AI-powered productivity companion that predicts deadline risks, breaks down complex tasks, manages energy-based schedules, and adapts dynamically to save your commitments.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
